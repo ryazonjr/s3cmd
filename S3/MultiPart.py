@@ -7,6 +7,7 @@ from stat import ST_SIZE
 from logging import debug, info, warning, error
 from Utils import getTextFromXml, formatSize, unicodise
 from Exceptions import S3UploadError
+from multiprocessing.pool import ThreadPool
 
 class MultiPartUpload(object):
 
@@ -51,6 +52,8 @@ class MultiPartUpload(object):
         else:
             debug("MultiPart: Uploading from %s" % (self.file.name))
 
+        tp = ThreadPool(processes=nr_parts)
+        results = list()
         seq = 1
         if self.file.name != "<stdin>":
             while size_left > 0:
@@ -63,12 +66,18 @@ class MultiPartUpload(object):
                     'extra' : "[part %d of %d, %s]" % (seq, nr_parts, "%d%sB" % formatSize(current_chunk_size, human_readable = True))
                 }
                 try:
-                    self.upload_part(seq, offset, current_chunk_size, labels)
+                    file = open(self.file.name, "rb")
+                    results.append(tp.apply_async(self.upload_part, args = (file, seq, offset, current_chunk_size, labels)))
                 except:
                     error(u"Upload of '%s' part %d failed. Aborting multipart upload." % (self.file.name, seq))
                     self.abort_upload()
                     raise
                 seq += 1
+
+            for part in range(nr_parts):
+                results[part].get()
+
+
         else:
             while True:
                 buffer = self.file.read(self.chunk_size)
@@ -82,7 +91,7 @@ class MultiPartUpload(object):
                 if len(buffer) == 0: # EOF
                     break
                 try:
-                    self.upload_part(seq, offset, current_chunk_size, labels, buffer)
+                    self.upload_part(self.file, seq, offset, current_chunk_size, labels, buffer)
                 except:
                     error(u"Upload of '%s' part %d failed. Aborting multipart upload." % (self.file.name, seq))
                     self.abort_upload()
@@ -91,7 +100,7 @@ class MultiPartUpload(object):
 
         debug("MultiPart: Upload finished: %d parts", seq - 1)
 
-    def upload_part(self, seq, offset, chunk_size, labels, buffer = ''):
+    def upload_part(self, file, seq, offset, chunk_size, labels, buffer = ''):
         """
         Upload a file chunk
         http://docs.amazonwebservices.com/AmazonS3/latest/API/index.html?mpUploadUploadPart.html
@@ -101,7 +110,7 @@ class MultiPartUpload(object):
         headers = { "content-length": chunk_size }
         query_string = "?partNumber=%i&uploadId=%s" % (seq, self.upload_id)
         request = self.s3.create_request("OBJECT_PUT", uri = self.uri, headers = headers, extra = query_string)
-        response = self.s3.send_file(request, self.file, labels, buffer, offset = offset, chunk_size = chunk_size)
+        response = self.s3.send_file(request, file, labels, buffer, offset = offset, chunk_size = chunk_size)
         self.parts[seq] = response["headers"]["etag"]
         return response
 
